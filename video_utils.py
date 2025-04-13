@@ -11,7 +11,6 @@ from moviepy import VideoFileClip
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 from pytube.exceptions import PytubeError
 from pytubefix import YouTube
-from pytubefix.cli import on_progress
 
 # from pytubefix.cli import on_progress # Requires rich, avoid for simplicity unless requested
 
@@ -309,7 +308,7 @@ def generate_clip_preview(video_path: str, preview_start_s: float, preview_end_s
             video_path,
             preview_start_s,
             preview_end_s,
-            targetname=str(preview_output_path) # Needs to be a string
+            str(preview_output_path) # Pass as 4th positional arg
         )
 
         # Alternative using moviepy objects (might be slower, more resource intensive)
