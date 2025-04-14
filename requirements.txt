@@ -3,3 +3,4 @@ pandas
 pytube
 pytubefix
 moviepy
+rich

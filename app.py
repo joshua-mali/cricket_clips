@@ -1,6 +1,8 @@
 # Placeholder for Streamlit application code 
 
+import io  # Import io
 import os  # Add os import
+import zipfile  # Import zipfile
 from pathlib import Path  # Import Path
 
 import pandas as pd
@@ -364,7 +366,7 @@ elif st.session_state.current_step == "5. Generate Clips":
             st.rerun()
     else:
         st.info(f"Ready to generate {len(st.session_state.prepared_clips)} clips based on the adjusted times.")
-        st.write(f"Clips will be saved to: `{st.session_state.output_dir}`")
+        st.write(f"Clips will be saved temporarily to: `{st.session_state.output_dir}` before download.") # Adjusted text slightly
 
         if st.button("✨ Generate All Clips ✨", type="primary"):
             with st.spinner("Generating clips... This may take a while."):
@@ -389,8 +391,9 @@ elif st.session_state.current_step == "5. Generate Clips":
 
         if st.session_state.generated_clips:
             st.subheader("Download Generated Clips")
-            # No need to create dummy files anymore
-            # os.makedirs(st.session_state.output_dir, exist_ok=True)
+
+            # --- Option 1: Individual Downloads (Keep existing logic) ---
+            st.write("Download individual clips:")
             for clip_path in st.session_state.generated_clips:
                 clip_filename = os.path.basename(clip_path)
                 try:
@@ -408,6 +411,41 @@ elif st.session_state.current_step == "5. Generate Clips":
                 except Exception as e:
                      st.error(f"Error preparing download for {clip_filename}: {e}")
                      video_utils.logging.error(f"Download button preparation error for {clip_filename}: {e}", exc_info=True)
+
+            st.divider()
+
+            # --- Option 2: Download All as ZIP ---
+            st.write("Download all clips as a single ZIP file:")
+            # Create ZIP in memory
+            zip_buffer = io.BytesIO()
+            try:
+                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                    for file_path in st.session_state.generated_clips:
+                         if os.path.exists(file_path):
+                             file_name = os.path.basename(file_path)
+                             zip_file.write(file_path, arcname=file_name) # arcname avoids storing full path
+                         else:
+                             # Use logging from video_utils if available, or print
+                             (video_utils.logging if video_utils else print)(f"Warning: File not found when creating ZIP: {file_path}")
+
+                zip_buffer.seek(0) # Rewind buffer
+
+                # Suggest a filename for the ZIP
+                zip_filename = "cricket_clips.zip"
+                if st.session_state.video_metadata and 'title' in st.session_state.video_metadata:
+                    sanitized_title = video_utils.sanitize_filename(st.session_state.video_metadata['title'])
+                    zip_filename = f"{sanitized_title}_clips.zip"
+
+                st.download_button(
+                    label="Download All Clips (.zip)",
+                    data=zip_buffer,
+                    file_name=zip_filename,
+                    mime="application/zip",
+                    key="download_all_zip"
+                )
+            except Exception as e:
+                 st.error(f"Could not create ZIP file: {e}")
+                 video_utils.logging.error(f"ZIP creation error: {e}", exc_info=True)
 
 
 # --- Fallback for unknown state ---

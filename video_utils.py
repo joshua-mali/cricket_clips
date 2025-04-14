@@ -11,6 +11,7 @@ from moviepy import VideoFileClip
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 from pytube.exceptions import PytubeError
 from pytubefix import YouTube
+from pytubefix.cli import on_progress  # Import the progress callback
 
 # from pytubefix.cli import on_progress # Requires rich, avoid for simplicity unless requested
 
@@ -66,20 +67,24 @@ def download_video(url: str):
 
         yt = YouTube(
             url,
-            use_oauth=False, # Set to True if needed for private/age-restricted videos
+            use_oauth=False,
             allow_oauth_cache=True,
-            # on_progress_callback=on_progress # Add back if progress display is essential
+            on_progress_callback=on_progress # Enable the progress callback
         )
 
-        stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
-        if not stream:
-            stream = yt.streams.filter(file_extension='mp4').order_by('resolution').desc().first() # Try non-progressive
+        # Get the highest resolution MP4 stream (video only or combined)
+        stream = yt.streams.filter(file_extension='mp4').order_by('resolution').desc().first()
+
+        # Deprecated logic trying progressive first
+        # stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+        # if not stream:
+        #     stream = yt.streams.filter(file_extension='mp4').order_by('resolution').desc().first() # Try non-progressive
 
         if not stream:
             logging.error("No suitable MP4 stream found.")
             return None, None
 
-        logging.info(f"Selected stream: {stream}")
+        logging.info(f"Selected highest resolution MP4 stream: {stream}")
         output_filename = sanitize_filename(f"{yt.title}.mp4")
         video_file_path = TEMP_VIDEO_DIR / output_filename
 
@@ -102,9 +107,17 @@ def download_video(url: str):
         return None, None
 
 
+# List of essential columns identified by the user + Wicket
+# Ensure 'Timestamp' matches the exact column name in your CSV
+ESSENTIAL_COLUMNS = [
+    'Match', 'Date', 'Batter', 'Bowler', 'Runs', 'Timestamp',
+    'Winning Team', 'Batting Team', 'Wicket' # Keeping Wicket for filtering, adjust if needed
+]
+
 def load_and_process_csv(uploaded_file, first_event_video_seconds: float):
     """
-    Loads the match data CSV, processes timestamps, and calculates video timestamps.
+    Loads essential columns from the match data CSV, processes timestamps,
+    and calculates video timestamps.
 
     Args:
         uploaded_file: The file-like object from st.file_uploader.
@@ -114,66 +127,73 @@ def load_and_process_csv(uploaded_file, first_event_video_seconds: float):
     Returns:
         Pandas DataFrame with added 'Video Timestamp (s)' column, or None on error.
     """
-    logging.info("Loading and processing CSV.")
+    logging.info("Loading and processing CSV (Essential Columns).")
     try:
-        df = pd.read_csv(uploaded_file)
-        logging.info(f"CSV loaded with columns: {df.columns.tolist()}")
+        # Use 'usecols' to load only necessary columns
+        # Add error handling in case a required column isn't in the list or file
+        def check_cols(cols_to_check):
+            if not all(col in cols_to_check for col in ESSENTIAL_COLUMNS):
+                missing = [col for col in ESSENTIAL_COLUMNS if col not in cols_to_check]
+                raise ValueError(f"CSV is missing essential columns: {missing}. Required: {ESSENTIAL_COLUMNS}")
+            return [col for col in cols_to_check if col in ESSENTIAL_COLUMNS]
 
-        # --- Data Cleaning and Timestamp Parsing (Adapt based on actual CSV format) ---
-        # 1. Identify the actual timestamp column used for event timing.
-        #    Assuming it's 'Timestamp' for now. Adjust if different.
-        timestamp_col = 'Timestamp' # <<< ADJUST THIS if your column name is different
-        if timestamp_col not in df.columns:
-            logging.error(f"Required column '{timestamp_col}' not found in CSV.")
-            raise ValueError(f"CSV must contain a '{timestamp_col}' column.")
+        # Read initially with usecols=check_cols (requires pandas >= 1.4.0)
+        # df = pd.read_csv(uploaded_file, usecols=check_cols)
 
-        # 2. Parse the timestamp column. Handle potential variations in format.
-        #    Using 'mixed' format and inferring datetime format can be slow but flexible.
-        #    Specify format string if known (e.g., format='%Y-%m-%d %H:%M:%S.%f') for performance.
+        # Safer alternative for broader pandas compatibility: Read headers, check, then read with usecols list
+        temp_df_headers = pd.read_csv(uploaded_file, nrows=0) # Read only headers
+        actual_cols_in_file = temp_df_headers.columns.tolist()
+        logging.info(f"CSV contains columns: {actual_cols_in_file}")
+
+        missing = [col for col in ESSENTIAL_COLUMNS if col not in actual_cols_in_file]
+        if missing:
+             raise ValueError(f"CSV is missing essential columns: {missing}. Required: {ESSENTIAL_COLUMNS}")
+
+        # Reload with the validated essential columns
+        uploaded_file.seek(0) # Reset file pointer
+        df = pd.read_csv(uploaded_file, usecols=ESSENTIAL_COLUMNS)
+
+        logging.info(f"CSV loaded successfully with essential columns: {df.columns.tolist()}")
+
+        # --- Data Cleaning and Timestamp Parsing ---
+        timestamp_col = 'Timestamp' # Still assuming this name
+
+        # Parse the timestamp column (rest of the parsing logic remains similar)
         try:
-            df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors='coerce', format='mixed', dayfirst=True) # Added dayfirst=True as common variation
+            df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors='coerce', format='mixed', dayfirst=True)
         except Exception as parse_error:
              logging.warning(f"Initial datetime parse failed: {parse_error}. Trying without format.")
              try:
-                 # Fallback attempt without explicit format
                  df[timestamp_col] = pd.to_datetime(df[timestamp_col], errors='coerce')
              except Exception as fallback_parse_error:
                   logging.error(f"Could not parse timestamp column '{timestamp_col}': {fallback_parse_error}", exc_info=True)
                   raise ValueError(f"Failed to parse dates in column '{timestamp_col}'. Check format.")
-
 
         # Drop rows where timestamp parsing failed
         original_rows = len(df)
         df.dropna(subset=[timestamp_col], inplace=True)
         if len(df) < original_rows:
             logging.warning(f"Dropped {original_rows - len(df)} rows due to unparseable timestamps.")
-
         if df.empty:
-             logging.error("CSV is empty after dropping rows with invalid timestamps.")
-             raise ValueError("No valid timestamp data found in CSV.")
+             raise ValueError("No valid timestamp data found in CSV after filtering columns/rows.")
 
-        # 3. Sort by timestamp to ensure correct order for offset calculation.
+        # Sort by timestamp
         df.sort_values(by=timestamp_col, inplace=True)
-        df.reset_index(drop=True, inplace=True) # Reset index after sorting
+        df.reset_index(drop=True, inplace=True)
 
         # --- Calculate Video Timestamp Offset ---
-        # Get the *very first* timestamp from the sorted CSV data
         first_csv_timestamp = df[timestamp_col].iloc[0]
-
-        # Calculate the time difference *in seconds* for every row relative to the first row
         time_diff_seconds = (df[timestamp_col] - first_csv_timestamp).dt.total_seconds()
-
-        # Add the user-provided offset (time of first event in video)
         df['Video Timestamp (s)'] = first_event_video_seconds + time_diff_seconds
 
-        # --- Optional: Clean other columns as needed ---
-        # Example: Fill NaNs in 'Batter', 'Bowler' if necessary
-        # df['Batter'] = df['Batter'].fillna('Unknown Batter')
-        # df['Wicket'] = df['Wicket'].fillna(False) # Assuming NaN means no wicket
-
-        logging.info("CSV processing complete.")
+        logging.info("CSV processing complete with essential columns.")
         return df
 
+    except ValueError as ve: # Catch specific ValueError for missing columns
+        logging.error(f"CSV Loading/Processing Error: {ve}")
+        # Re-raise or return None, depending on how you want app.py to handle it
+        # Returning None allows app.py to display the specific error
+        return None
     except Exception as e:
         logging.error(f"Error processing CSV: {e}", exc_info=True)
         return None
