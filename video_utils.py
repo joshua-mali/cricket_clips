@@ -466,7 +466,7 @@ def generate_clips(clip_definitions: list, video_path: str, output_dir: str):
 
             for i, clip_def in enumerate(clip_definitions):
                 start_s = clip_def['adjusted_start']
-                end_s = clip_def['adjusted_end']
+                end_s = start_s + 20 # Calculate end time based on fixed 20s duration
                 event_desc = clip_def.get('event_desc', f'clip_{i+1}') # Fallback description
 
                 # --- Validation ---

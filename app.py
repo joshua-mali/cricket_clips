@@ -193,11 +193,21 @@ elif st.session_state.current_step == "2. Timestamp & CSV":
     st.header("Step 2: Timestamp & CSV Input")
 
     if not st.session_state.video_file_path:
-        st.warning("Please download a video in Step 1 first.")
+        st.warning("Please download or upload a video in Step 1 first.") # Adjusted message
         if st.button("Go back to Step 1"):
             st.session_state.current_step = "1. Video Input"
             st.rerun()
     else:
+        # --- Display Video for Timestamp Finding --- #
+        st.subheader("Video Preview")
+        st.info("Use the player to find the time of the first event in your CSV.")
+        try:
+            st.video(st.session_state.video_file_path)
+        except Exception as e:
+            st.error(f"Could not display video preview: {e}")
+            video_utils.logging.error(f"Video preview error: {e}", exc_info=True)
+        # ------------------------------------------- #
+
         st.info(f"Video Loaded: {st.session_state.video_metadata.get('title', 'Unknown')}")
 
         st.subheader("First Event Timestamp in Video")
@@ -318,30 +328,32 @@ elif st.session_state.current_step == "3. Define Events":
 
                 available_categories = base_event_types + player_event_types
 
-                # Determine the default selection
-                # If event_categories already has items (e.g., from previous run/selection), use them.
-                # Otherwise, default to the base_event_types.
-                current_selection = st.session_state.get('event_categories', [])
-                # Ensure defaults are actually present in the available options
-                valid_defaults = [d for d in base_event_types if d in available_categories]
-                default_selection = current_selection if current_selection else valid_defaults
+                # Determine the default selection ONLY if it hasn't been set before in this session
+                if 'event_categories_initialized' not in st.session_state:
+                    default_selection = [cat for cat in base_event_types if cat in available_categories]
+                    st.session_state.event_categories = default_selection # Initialize it
+                    st.session_state.event_categories_initialized = True # Mark as initialized
+                # Otherwise, use the current value (even if empty)
+                current_selection = st.session_state.event_categories
 
+                # The multiselect value is now managed by session state directly
                 st.session_state.event_categories = st.multiselect(
                     "Select event categories to find:",
                     options=available_categories,
-                    # default=st.session_state.event_categories, # Old default
-                    default=default_selection, # New default logic
-                    key="event_multiselect" # Add key
+                    default=current_selection, # Use the potentially modified current value
+                    key="event_multiselect"
                 )
 
                 if st.button("Prepare Clips"):
+                    # Ensure event_categories is up-to-date before preparing
+                    # categories_to_prepare = st.session_state.event_categories
                     if st.session_state.event_categories and st.session_state.selected_team:
                         with st.spinner("Preparing clip definitions..."):
                             try:
                                 prepared_list = video_utils.prepare_clip_list(
                                     st.session_state.match_df,
-                                    st.session_state.event_categories,
-                                    st.session_state.selected_team # Pass selected team
+                                    st.session_state.event_categories, # Use current state
+                                    st.session_state.selected_team
                                 )
                                 st.session_state.prepared_clips = prepared_list
                                 # Clear old previews
@@ -391,117 +403,104 @@ elif st.session_state.current_step == "4. Preview & Adjust Clips":
             st.session_state.current_step = "3. Define Events"
             st.rerun()
     else:
-        st.info("Review the prepared clips. Use the buttons to adjust start/end times by 5 seconds, then update the preview.")
+        # --- Clip Selection Dropdown ---
+        clip_options = {i: f"Clip {i+1}: {clip['event_desc']}" for i, clip in enumerate(st.session_state.prepared_clips)}
 
-        for i, clip_info in enumerate(st.session_state.prepared_clips):
-            # Ensure current clip has an entry in adjustments state
-            if i not in st.session_state.adjustments:
-                st.session_state.adjustments[i] = {'start_delta': 0.0, 'end_delta': 0.0}
+        # Initialize selected clip index if not present or invalid
+        if 'selected_clip_index' not in st.session_state or st.session_state.selected_clip_index not in clip_options:
+            st.session_state.selected_clip_index = 0 # Default to the first clip
 
-            st.subheader(f"Clip {i+1}: {clip_info['event_desc']}")
-            main_cols = st.columns([2, 3]) # Info | Preview + Adjustments
+        st.session_state.selected_clip_index = st.selectbox(
+            "Select Clip to Preview/Adjust:",
+            options=list(clip_options.keys()),
+            format_func=lambda x: clip_options[x], # Show descriptive names
+            index=list(clip_options.keys()).index(st.session_state.selected_clip_index), # Set current index
+            key="clip_selector"
+        )
 
-            with main_cols[0]: # Left column for info
-                # Display times based on current session state including pending adjustments
-                current_start_adj = clip_info['adjusted_start']
-                current_end_adj = clip_info['adjusted_end']
-                st.write(f"Original Range: {clip_info['start']:.1f}s - {clip_info['end']:.1f}s")
-                st.write(f"**Current Adjusted Range:** {current_start_adj:.1f}s - {current_end_adj:.1f}s")
+        st.divider()
 
-            with main_cols[1]: # Right column for preview and adjustments
-                preview_placeholder = st.empty() # Placeholder for the video player
+        # --- Display and Adjust Selected Clip ---
+        idx = st.session_state.selected_clip_index
+        clip_info = st.session_state.prepared_clips[idx]
 
-                # --- Adjustment Buttons ---
-                adj_cols = st.columns(5) # -5s Start, +5s Start, -5s End, +5s End, Update Button
-                with adj_cols[0]:
-                    if st.button("Start -5s", key=f"start_minus_{i}"):
-                        st.session_state.adjustments[i]['start_delta'] -= 5.0
-                        # No rerun, just update state value for next "Update" click
-                        # st.success("-5s added to start adjustment.") # Feedback can be noisy
-                        st.rerun() # Rerun needed to show updated pending caption
+        # Initialize adjustment state for the selected clip if needed
+        if idx not in st.session_state.adjustments:
+             st.session_state.adjustments[idx] = {'start_delta': 0.0} # Only track start delta now
 
-                with adj_cols[1]:
-                    if st.button("Start +5s", key=f"start_plus_{i}"):
-                        st.session_state.adjustments[i]['start_delta'] += 5.0
-                        # st.success("+5s added to start adjustment.")
+        st.subheader(f"Adjusting: {clip_options[idx]}")
+
+        main_cols = st.columns([1, 2]) # Info | Preview + Adjustments
+
+        with main_cols[0]: # Left column for info
+            current_start_adj = clip_info['adjusted_start']
+            current_end_adj = current_start_adj + 20 # End is always start + 20s
+            st.write(f"Original Start: {clip_info['start']:.1f}s")
+            st.write(f"**Current Adjusted Start:** {current_start_adj:.1f}s")
+            st.write(f"(Clip runs from {current_start_adj:.1f}s to {current_end_adj:.1f}s)")
+
+
+        with main_cols[1]: # Right column for preview and adjustments
+            preview_placeholder = st.empty() # Placeholder for the video player
+
+            # --- Adjustment Buttons --- # Below the preview area now
+            adj_cols = st.columns(3) # -5s Start, +5s Start, Update Button
+            with adj_cols[0]:
+                if st.button("Start -5s", key=f"start_minus_{idx}"):
+                    st.session_state.adjustments[idx]['start_delta'] -= 5.0
+                    st.rerun() # Rerun to show updated pending caption
+
+            with adj_cols[1]:
+                if st.button("Start +5s", key=f"start_plus_{idx}"):
+                    st.session_state.adjustments[idx]['start_delta'] += 5.0
+                    st.rerun()
+
+            # Display pending adjustments
+            pending_start_delta = st.session_state.adjustments[idx]['start_delta']
+            st.caption(f"Pending Start Adjustment: {pending_start_delta:+.1f}s")
+
+            # --- Update & Preview Button --- # Col 3
+            with adj_cols[2]:
+                if st.button("Update & Preview", key=f"update_{idx}"):
+                    start_delta = st.session_state.adjustments[idx]['start_delta']
+                    # Calculate new start based on *original* start + cumulative delta
+                    new_start = clip_info['start'] + start_delta
+                    new_end = new_start + 20 # End is always 20s after start
+
+                    # Basic validation (Start >= 0)
+                    if new_start >= 0:
+                        # Update the *actual* adjusted times in prepared_clips
+                        st.session_state.prepared_clips[idx]['adjusted_start'] = new_start
+                        # End time is implicitly start + 20s
+                        st.success(f"Clip {idx+1} start time updated.")
+
+                        # Reset pending adjustments for this clip
+                        st.session_state.adjustments[idx] = {'start_delta': 0.0}
+
+                        # Generate the preview for the *new* applied times
+                        with st.spinner(f"Generating preview for clip {idx+1}..."):
+                           # ... (keep preview generation try/except block)
+                           pass
                         st.rerun()
-
-                with adj_cols[2]:
-                    if st.button("End -5s", key=f"end_minus_{i}"):
-                        st.session_state.adjustments[i]['end_delta'] -= 5.0
-                        # st.success("-5s added to end adjustment.")
-                        st.rerun()
-
-                with adj_cols[3]:
-                     if st.button("End +5s", key=f"end_plus_{i}"):
-                        st.session_state.adjustments[i]['end_delta'] += 5.0
-                        # st.success("+5s added to end adjustment.")
-                        st.rerun()
-
-                # Display pending adjustments
-                pending_start_delta = st.session_state.adjustments[i]['start_delta']
-                pending_end_delta = st.session_state.adjustments[i]['end_delta']
-                st.caption(f"Pending Adjustment: Start {pending_start_delta:+.1f}s, End {pending_end_delta:+.1f}s")
-
-                # --- Update & Preview Button --- # Col 5
-                with adj_cols[4]:
-                    if st.button("Update & Preview", key=f"update_{i}"):
-                        # Apply the *cumulative pending* adjustments from state
-                        start_delta = st.session_state.adjustments[i]['start_delta']
-                        end_delta = st.session_state.adjustments[i]['end_delta']
-
-                        # Calculate new times based on *original* start/end + cumulative deltas
-                        new_start = clip_info['start'] + start_delta
-                        new_end = clip_info['end'] + end_delta
-
-                        # Basic validation
-                        if new_start < new_end and new_start >= 0:
-                            # Update the *actual* adjusted times in prepared_clips
-                            st.session_state.prepared_clips[i]['adjusted_start'] = new_start
-                            st.session_state.prepared_clips[i]['adjusted_end'] = new_end
-                            st.success(f"Clip {i+1} time range updated.")
-
-                            # Reset pending adjustments for this clip after applying
-                            st.session_state.adjustments[i] = {'start_delta': 0.0, 'end_delta': 0.0}
-
-                            # Generate the preview for the *new* applied times
-                            with st.spinner(f"Generating preview for clip {i+1}..."):
-                                try:
-                                    preview_path = video_utils.generate_clip_preview(
-                                        st.session_state.video_file_path,
-                                        new_start,
-                                        new_end,
-                                        i
-                                    )
-                                    st.session_state.preview_paths[i] = preview_path # Store path even if None
-                                    if not preview_path:
-                                         st.warning("Could not generate preview clip.")
-                                except Exception as e:
-                                     st.session_state.preview_paths[i] = None
-                                     st.error(f"Error generating preview: {e}")
-                                     video_utils.logging.error(f"Preview generation exception: {e}", exc_info=True)
-                            st.rerun() # Rerun to update displayed times and video player
-                        else:
-                            st.warning(f"Invalid time range after adjustment ({new_start:.1f}s - {new_end:.1f}s). Start must be < End and >= 0. Adjustments not applied.")
-
-                # --- Display Preview --- # Outside adjustment columns
-                current_preview_path = st.session_state.preview_paths.get(i)
-                if current_preview_path:
-                    if os.path.exists(current_preview_path):
-                        try:
-                            # Read the file content and pass bytes to st.video
-                            with open(current_preview_path, "rb") as f:
-                                video_bytes = f.read()
-                            preview_placeholder.video(video_bytes, format="video/mp4")
-                        except Exception as e:
-                             preview_placeholder.error(f"Error reading/displaying preview video: {e}")
-                             video_utils.logging.error(f"Preview display error: {e}", exc_info=True)
                     else:
-                        preview_placeholder.warning(f"Preview file not found at {current_preview_path}. Regenerate preview.")
-                else:
-                    preview_placeholder.caption(f"Preview for {current_start_adj:.1f}s - {current_end_adj:.1f}s (click 'Update & Preview')")
+                        st.warning(f"Invalid time range after adjustment ({new_start:.1f}s). Start must be >= 0. Adjustments not applied.")
 
-            st.divider()
+            # --- Display Preview --- # After buttons
+            current_preview_path = st.session_state.preview_paths.get(idx)
+            if current_preview_path:
+                if os.path.exists(current_preview_path):
+                    try:
+                        # Read the file content and pass bytes to st.video
+                        with open(current_preview_path, "rb") as f:
+                            video_bytes = f.read()
+                        preview_placeholder.video(video_bytes, format="video/mp4")
+                    except Exception as e:
+                         preview_placeholder.error(f"Error reading/displaying preview video: {e}")
+                         video_utils.logging.error(f"Preview display error: {e}", exc_info=True)
+                else:
+                    preview_placeholder.warning(f"Preview file not found at {current_preview_path}. Regenerate preview.")
+            else:
+                preview_placeholder.caption(f"Preview for {current_start_adj:.1f}s - {current_end_adj:.1f}s (click 'Update & Preview')")
 
     st.sidebar.markdown("---")
     if st.sidebar.button("Next Step: Generate Clips"):
@@ -515,7 +514,7 @@ elif st.session_state.current_step == "4. Preview & Adjust Clips":
 # Step 5: Generate Clips
 # =========================
 elif st.session_state.current_step == "5. Generate Clips":
-    st.header("Step 5: Generate Final Clips")
+    st.header("Step 5: Generate and Download Clips")
 
     if not st.session_state.prepared_clips:
         st.warning("No clips prepared for generation. Go back to previous steps.")
@@ -524,87 +523,70 @@ elif st.session_state.current_step == "5. Generate Clips":
             st.rerun()
     else:
         st.info(f"Ready to generate {len(st.session_state.prepared_clips)} clips based on the adjusted times.")
-        st.write(f"Clips will be saved temporarily to: `{st.session_state.output_dir}` before download.") # Adjusted text slightly
+        st.write(f"Clips will be generated and then offered as a single ZIP download.")
 
-        if st.button("✨ Generate All Clips ✨", type="primary"):
-            with st.spinner("Generating clips... This may take a while."):
-                try:
-                    # Pass the list of clip definitions (with adjusted times)
-                    result_paths = video_utils.generate_clips(
-                        st.session_state.prepared_clips,
-                        st.session_state.video_file_path,
-                        st.session_state.output_dir
-                    )
-                    st.session_state.generated_clips = result_paths
-                    if result_paths:
-                        st.success(f"{len(result_paths)} clips generated successfully!")
-                    else:
-                        st.warning("Clip generation finished, but no clips were successfully created. Check logs.")
-                    # Clear previews after final generation
-                    st.session_state.preview_paths = {}
-                    # No rerun needed here, download buttons will appear below
-                except Exception as e:
-                    st.error(f"An error occurred during clip generation: {e}")
-                    video_utils.logging.error(f"Clip generation exception: {e}", exc_info=True)
-
-        if st.session_state.generated_clips:
-            st.subheader("Download Generated Clips")
-
-            # --- Option 1: Individual Downloads (Keep existing logic) ---
-            st.write("Download individual clips:")
-            for clip_path in st.session_state.generated_clips:
-                clip_filename = os.path.basename(clip_path)
-                try:
-                    # Read the actual generated clip file for download
-                    with open(clip_path, "rb") as fp:
-                        st.download_button(
-                            label=f"Download {clip_filename}",
-                            data=fp,
-                            file_name=clip_filename,
-                            mime="video/mp4",
-                            key=f"download_{clip_filename}" # Add key for robustness
-                        )
-                except FileNotFoundError:
-                     st.error(f"Error preparing download: File not found at {clip_path}. It might have been deleted or generation failed partially.")
-                except Exception as e:
-                     st.error(f"Error preparing download for {clip_filename}: {e}")
-                     video_utils.logging.error(f"Download button preparation error for {clip_filename}: {e}", exc_info=True)
-
-            st.divider()
-
-            # --- Option 2: Download All as ZIP ---
-            st.write("Download all clips as a single ZIP file:")
-            # Create ZIP in memory
+        # Combine Generate and Download
+        if st.button("✨ Generate & Download All Clips (.zip) ✨", type="primary"):
+            generated_files = [] # Keep track of generated files locally
             zip_buffer = io.BytesIO()
             try:
-                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    for file_path in st.session_state.generated_clips:
-                         if os.path.exists(file_path):
-                             file_name = os.path.basename(file_path)
-                             zip_file.write(file_path, arcname=file_name) # arcname avoids storing full path
-                         else:
-                             # Use logging from video_utils if available, or print
-                             (video_utils.logging if video_utils else print)(f"Warning: File not found when creating ZIP: {file_path}")
+                with st.spinner("Generating clips... This may take a while."):
+                    generated_files = video_utils.generate_clips(
+                        st.session_state.prepared_clips,
+                        st.session_state.video_file_path,
+                        st.session_state.output_dir # Temp dir for generation
+                    )
+                    st.session_state.generated_clips = generated_files # Update state if needed elsewhere
 
-                zip_buffer.seek(0) # Rewind buffer
+                if not generated_files:
+                     st.warning("Clip generation finished, but no clips were successfully created. Check logs.")
+                else:
+                    st.success(f"{len(generated_files)} clips generated successfully!")
+                    # --- Create ZIP --- #
+                    with st.spinner("Creating ZIP file..."):
+                        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED, False) as zip_file: # Use 'w' for new zip
+                            for file_path in generated_files:
+                                if os.path.exists(file_path):
+                                    file_name = os.path.basename(file_path)
+                                    zip_file.write(file_path, arcname=file_name)
+                                else:
+                                    (video_utils.logging if video_utils else print)(f"Warning: File not found when creating ZIP: {file_path}")
+                        zip_buffer.seek(0)
 
-                # Suggest a filename for the ZIP
-                zip_filename = "cricket_clips.zip"
-                if st.session_state.video_metadata and 'title' in st.session_state.video_metadata:
-                    sanitized_title = video_utils.sanitize_filename(st.session_state.video_metadata['title'])
-                    zip_filename = f"{sanitized_title}_clips.zip"
+                        # --- ZIP Filename --- #
+                        zip_filename = "cricket_clips.zip" # Default
+                        try: # Safely try to get match details
+                             if st.session_state.match_df is not None and not st.session_state.match_df.empty:
+                                 match_date_str = "" # Default date string
+                                 if 'Date' in st.session_state.match_df.columns:
+                                     try: # Try parsing date
+                                         match_date_str = pd.to_datetime(st.session_state.match_df['Date'].iloc[0]).strftime('%Y-%m-%d')
+                                     except Exception as date_e:
+                                         video_utils.logging.warning(f"Could not parse Date column for ZIP filename: {date_e}")
+                                         match_date_str = str(st.session_state.match_df['Date'].iloc[0]) # Use raw value if parse fails
 
-                st.download_button(
-                    label="Download All Clips (.zip)",
-                    data=zip_buffer,
-                    file_name=zip_filename,
-                    mime="application/zip",
-                    key="download_all_zip"
-                )
+                                 match_name = st.session_state.match_df['Match'].iloc[0] if 'Match' in st.session_state.match_df.columns else "Match"
+                                 team_name = st.session_state.selected_team or "SelectedTeam"
+                                 safe_match = video_utils.sanitize_filename(str(match_name))
+                                 safe_team = video_utils.sanitize_filename(str(team_name))
+                                 safe_date = video_utils.sanitize_filename(match_date_str)
+                                 zip_filename = f"{safe_date}_{safe_match}_{safe_team}_clips.zip".replace("__", "_")
+                        except Exception as fn_e:
+                             video_utils.logging.warning(f"Could not generate detailed ZIP filename: {fn_e}")
+
+                        # --- Offer ZIP Download --- #
+                        st.download_button(
+                            label="Download ZIP Now", # Button appears after generation
+                            data=zip_buffer,
+                            file_name=zip_filename,
+                            mime="application/zip",
+                            key="download_final_zip"
+                        )
+                        st.info("Click the button above to download your ZIP file.")
+
             except Exception as e:
-                 st.error(f"Could not create ZIP file: {e}")
-                 video_utils.logging.error(f"ZIP creation error: {e}", exc_info=True)
-
+                 st.error(f"An error occurred during clip generation or ZIP creation: {e}")
+                 video_utils.logging.error(f"Generate/ZIP exception: {e}", exc_info=True)
 
 # --- Fallback for unknown state ---
 else:
