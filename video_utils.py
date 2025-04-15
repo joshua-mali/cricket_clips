@@ -9,7 +9,6 @@ from pathlib import Path
 import pandas as pd
 from moviepy import VideoFileClip
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
-from pytube.exceptions import PytubeError
 from pytubefix import YouTube
 from pytubefix.cli import on_progress  # Import the progress callback
 
@@ -18,8 +17,8 @@ from pytubefix.cli import on_progress  # Import the progress callback
 # --- Constants ---
 TEMP_VIDEO_DIR = Path("/app/temp_video")
 TEMP_PREVIEW_DIR = Path("/app/temp_previews")
-DEFAULT_CLIP_BEFORE_EVENT_S = 5
-DEFAULT_CLIP_AFTER_EVENT_S = 15
+DEFAULT_CLIP_BEFORE_EVENT_S = 0
+DEFAULT_CLIP_AFTER_EVENT_S = 20
 
 # Ensure temporary directories exist
 TEMP_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
@@ -199,65 +198,119 @@ def load_and_process_csv(uploaded_file, first_event_video_seconds: float):
         return None
 
 
-def prepare_clip_list(df: pd.DataFrame, event_categories: list):
+def prepare_clip_list(df: pd.DataFrame, event_categories: list, selected_team: str):
     """
-    Filters the DataFrame based on selected event categories and prepares clip definitions.
+    Filters the DataFrame based on selected event categories and team,
+    and prepares clip definitions.
 
     Args:
         df: The processed DataFrame with 'Video Timestamp (s)'.
         event_categories: A list of strings defining the desired events
                           (e.g., "All 4s", "Player A - Wickets").
+        selected_team: The team name selected by the user for filtering.
 
     Returns:
         A list of dictionaries, each representing a clip to be potentially generated.
         Each dict includes: 'event_desc', 'start', 'end', 'adjusted_start', 'adjusted_end'.
         Returns an empty list if no matching events are found.
     """
-    logging.info(f"Preparing clip list for categories: {event_categories}")
+    logging.info(f"Preparing clip list for categories: {event_categories}, Team: {selected_team}")
     prepared_clips = []
 
     if df is None or df.empty:
         logging.warning("Input DataFrame is empty or None. Cannot prepare clips.")
         return []
+    if not selected_team:
+        logging.warning("No team selected. Cannot prepare clips.")
+        # Optionally raise ValueError("Please select a team first.")
+        return []
 
-    required_cols = ['Video Timestamp (s)', 'Batter', 'Runs', 'Wicket'] # Minimal required columns
+
+    required_cols = ['Video Timestamp (s)', 'Batter', 'Runs', 'Wicket', 'Batting Team'] # Added 'Batting Team'
     if not all(col in df.columns for col in required_cols):
-        logging.error(f"DataFrame missing one or more required columns: {required_cols}")
-        raise ValueError("DataFrame must contain 'Video Timestamp (s)', 'Batter', 'Runs', 'Wicket' columns.")
-
+        missing = [col for col in required_cols if col not in df.columns]
+        logging.error(f"DataFrame missing one or more required columns: {missing}")
+        raise ValueError(f"DataFrame must contain required columns: {required_cols}")
 
     for category in event_categories:
         logging.debug(f"Processing category: {category}")
         filtered_df = pd.DataFrame() # Initialize empty DataFrame for this category
 
         # --- Logic to filter based on category string ---
-        # This needs to parse the category string (e.g., "Player A - 4s")
         parts = category.split(' - ')
         player_filter = parts[0].strip()
-        event_filter = parts[1].strip() if len(parts) > 1 else "All" # Default if no specific event type
+
+        # --- CORRECTED PARSING ---
+        if len(parts) == 1:
+             # Handle cases like "All 4s", "All Wickets"
+             event_filter = player_filter # The whole string is the event filter
+             player_filter = "All Players" # Implicitly "All Players" for these types
+        elif len(parts) > 1:
+             # Handle player-specific cases like "Player A - 4s"
+             event_filter = parts[1].strip()
+        else:
+             logging.warning(f"Skipping invalid category format: {category}")
+             continue # Skip to next category
+
+        logging.debug(f"Parsed -> Player Filter: '{player_filter}', Event Filter: '{event_filter}'")
 
         temp_df = df.copy() # Work on a copy for filtering
 
-        # Apply player filter
+        # Apply Player Filter First (if not "All Players")
         if player_filter != "All Players":
-            # Check both Batter and Bowler based on context (wicket)
-            # This logic might need refinement based on exact desired behavior for player involvement
             is_batter = temp_df['Batter'] == player_filter
-            is_bowler_on_wicket = (temp_df['Bowler'] == player_filter) & (temp_df['Wicket'] == True) # Assuming Wicket column is boolean or similar
-            temp_df = temp_df[is_batter | is_bowler_on_wicket]
+            # Wickets are handled later based on team, so batter filter is primary here
+            temp_df = temp_df[is_batter]
 
+        # Apply Event Filter (Considering selected_team)
+        if player_filter == "All Players":
+            team_match_condition = temp_df['Batting Team'].str.strip().str.lower() == selected_team.strip().lower()
+            opponent_match_condition = temp_df['Batting Team'].str.strip().str.lower() != selected_team.strip().lower()
+            valid_wicket_condition = pd.notna(temp_df['Wicket']) & (temp_df['Wicket'] != False) & (temp_df['Wicket'] != 0)
 
-        # Apply event filter (4s, 6s, Wickets)
-        if "Wickets" in event_filter:
-            # Assuming Wicket column indicates a wicket event (e.g., True, or non-null text)
-            # Adjust condition based on how 'Wicket' column is represented
-            filtered_df = temp_df[pd.notna(temp_df['Wicket']) & (temp_df['Wicket'] != False) & (temp_df['Wicket'] != 0)] # More robust check for wicket
-        elif "4s" in event_filter:
-            filtered_df = temp_df[temp_df['Runs'] == 4]
-        elif "6s" in event_filter:
-            filtered_df = temp_df[temp_df['Runs'] == 6]
-        elif event_filter == "All": # Handle categories like "All Players" which might imply all events for them
-             filtered_df = temp_df # No specific event filter needed if it's just a player filter
+            # Use the corrected event_filter here
+            if "4s" in event_filter: # Check should now work for "All 4s"
+                condition = (temp_df['Runs'] == 4) & team_match_condition
+                filtered_df = temp_df[condition]
+                # --- DEBUG LOGGING (Ensure it's inside the correct block) ---
+                logging.info(f"--- Debug '{category}' for team '{selected_team}' ---")
+                logging.info(f"Team match condition applied. Matched rows: {team_match_condition.sum()}")
+                logging.info(f"Runs == 4 condition applied. Matched rows: {(temp_df['Runs'] == 4).sum()}")
+                logging.info(f"Combined condition applied. Final rows selected: {len(filtered_df)}")
+                if not filtered_df.empty:
+                     logging.info(f"Selected row indices: {filtered_df.index.tolist()}")
+                # --- END DEBUG ---
+            elif "6s" in event_filter: # Check should now work for "All 6s"
+                condition = (temp_df['Runs'] == 6) & team_match_condition
+                filtered_df = temp_df[condition]
+                # Add similar debug logging here if needed
+            elif "Wickets" in event_filter: # Check should now work for "All Wickets"
+                condition = valid_wicket_condition & opponent_match_condition
+                filtered_df = temp_df[condition]
+                # Add similar debug logging here if needed
+
+        else: # Player-specific filter
+            # Player name filtering already done on temp_df
+            # Still need to check team context for runs/wickets
+            team_match_condition = temp_df['Batting Team'].str.strip().str.lower() == selected_team.strip().lower()
+            # Opponent condition needs to be applied to the *original* df for bowler wickets
+            original_df_opponent_condition = df['Batting Team'].str.strip().str.lower() != selected_team.strip().lower()
+            original_df_valid_wicket = pd.notna(df['Wicket']) & (df['Wicket'] != False) & (df['Wicket'] != 0)
+
+            if "4s" in event_filter:
+                 # Player's runs *while batting for the selected team*
+                # filtered_df = temp_df[(temp_df['Runs'] == 4) & (temp_df['Batting Team'] == selected_team)]
+                filtered_df = temp_df[(temp_df['Runs'] == 4) & team_match_condition]
+            elif "6s" in event_filter:
+                 # Player's runs *while batting for the selected team*
+                # filtered_df = temp_df[(temp_df['Runs'] == 6) & (temp_df['Batting Team'] == selected_team)]
+                filtered_df = temp_df[(temp_df['Runs'] == 6) & team_match_condition]
+            elif "Wickets" in event_filter:
+                 # Wickets taken *by this player* (as Bowler) when the *other* team is batting
+                 # filtered_df = df[(df['Bowler'] == player_filter) & valid_wicket & (df['Batting Team'] != selected_team)]
+                 filtered_df = df[(df['Bowler'] == player_filter) & original_df_valid_wicket & original_df_opponent_condition]
+            # Add other player-specific categories if needed
+
 
         # --- Generate clip definitions from filtered rows ---
         for index, row in filtered_df.iterrows():
@@ -265,25 +318,37 @@ def prepare_clip_list(df: pd.DataFrame, event_categories: list):
             start_time_s = max(0, event_time_s - DEFAULT_CLIP_BEFORE_EVENT_S)
             end_time_s = event_time_s + DEFAULT_CLIP_AFTER_EVENT_S
 
-            # Create a descriptive label for the event
-            event_desc = f"{category} at {format_time(event_time_s)}"
-            if player_filter == "All Players" and 'Batter' in row and pd.notna(row['Batter']):
-                 event_desc = f"{row['Batter']} - {event_filter} at {format_time(event_time_s)}" # Add player name if known
+            # Create a descriptive label for the event (can be improved)
+            event_desc = f"{category} ({selected_team}) at {format_time(event_time_s)}"
+            # Try to make description more specific if possible
+            batter = row.get('Batter', '')
+            bowler = row.get('Bowler', '')
+            runs = row.get('Runs', None)
+            wicket_info = row.get('Wicket', None)
+
+            if player_filter != "All Players":
+                 event_desc = f"{player_filter} - {event_filter} at {format_time(event_time_s)}"
+            elif pd.notna(batter) and batter: # If 'All Players' but we know the batter
+                 event_desc = f"{batter} - {event_filter} at {format_time(event_time_s)}"
+            elif pd.notna(bowler) and bowler and "Wickets" in event_filter: # If 'All Players' wicket, show bowler
+                 event_desc = f"Wicket by {bowler} at {format_time(event_time_s)}"
 
 
             clip_def = {
                 "event_desc": event_desc,
-                "csv_row_index": index, # Keep track of original row if needed
+                "csv_row_index": index,
                 "start": start_time_s,
                 "end": end_time_s,
-                "adjusted_start": start_time_s, # Initially same as default
-                "adjusted_end": end_time_s,     # Initially same as default
-                "preview_path": None, # Placeholder for temporary preview file
+                "adjusted_start": start_time_s,
+                "adjusted_end": end_time_s,
+                "preview_path": None,
             }
             prepared_clips.append(clip_def)
             logging.debug(f"Added clip definition: {event_desc} ({start_time_s:.2f}s - {end_time_s:.2f}s)")
 
-    logging.info(f"Prepared {len(prepared_clips)} clip definitions.")
+    logging.info(f"Prepared {len(prepared_clips)} clip definitions for team '{selected_team}'.")
+    # Sort clips by start time before returning
+    prepared_clips.sort(key=lambda x: x['start'])
     return prepared_clips
 
 
@@ -324,24 +389,37 @@ def generate_clip_preview(video_path: str, preview_start_s: float, preview_end_s
     try:
         # Use ffmpeg_extract_subclip for potentially faster, lower-overhead extraction
         # It directly calls ffmpeg command
-        ffmpeg_extract_subclip(
-            video_path,
-            preview_start_s,
-            preview_end_s,
-            str(preview_output_path) # Pass as 4th positional arg
-        )
+        # --- THIS METHOD IS FAILING / CREATING INVALID FILES --- 
+        # ffmpeg_extract_subclip(
+        #     video_path,
+        #     preview_start_s,
+        #     preview_end_s,
+        #     str(preview_output_path) # Pass as 4th positional arg
+        # )
 
-        # Alternative using moviepy objects (might be slower, more resource intensive)
-        # with VideoFileClip(video_path) as video:
-        #     preview_clip = video.subclip(preview_start_s, preview_end_s)
-        #     # Lower quality settings for speed? May not be easily controllable here.
-        #     preview_clip.write_videofile(str(preview_output_path), codec="libx264", audio=False, logger=None) # Disable audio for speed
+        # --- Alternative using moviepy objects (more robust) --- 
+        # Load the main clip, extract subclip, and write it (re-encodes)
+        with VideoFileClip(video_path) as video:
+            # Add a small buffer to start/end to avoid potential precision issues
+            # buffer = 0.01 
+            preview_clip = video.subclipped(preview_start_s, preview_end_s)
+            # Write with specific codec, disable audio for speed, suppress ffmpeg command output
+            preview_clip.write_videofile(str(preview_output_path), 
+                                         codec="libx264", 
+                                         audio=False, 
+                                         logger=None, 
+                                         threads=2) # Limit threads slightly for preview maybe?
 
-        if preview_output_path.exists():
-            logging.info(f"Preview clip generated: {preview_output_path}")
+        if preview_output_path.exists() and preview_output_path.stat().st_size > 1024: # Check size > 1KB
+            logging.info(f"Preview clip generated: {preview_output_path} (Size: {preview_output_path.stat().st_size} bytes)")
             return str(preview_output_path)
         else:
-            logging.error(f"Preview clip generation failed (file not created): {preview_output_path}")
+            if not preview_output_path.exists():
+                 logging.error(f"Preview clip generation failed (file not created): {preview_output_path}")
+            else:
+                 logging.error(f"Preview clip generated but is too small (invalid): {preview_output_path} (Size: {preview_output_path.stat().st_size} bytes)")
+                 try: preview_output_path.unlink() # Clean up invalid file
+                 except OSError: pass
             return None
 
     except Exception as e:
@@ -416,7 +494,7 @@ def generate_clips(clip_definitions: list, video_path: str, output_dir: str):
 
                 try:
                     # Extract subclip
-                    sub_clip = video.subclip(start_s, end_s)
+                    sub_clip = video.subclipped(start_s, end_s)
 
                     # Write the subclip to the file
                     # Use sensible defaults. Add options for quality/codec if needed later.

@@ -19,4 +19,4 @@ COPY video_utils.py .
 EXPOSE 8501
 
 # Set the CMD to run the Streamlit app
-CMD ["streamlit", "run", "app.py", "--server.address=0.0.0.0"] 
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.maxUploadSize=5500"]

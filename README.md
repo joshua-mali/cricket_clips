@@ -4,7 +4,7 @@
 
 docker build -t joshuamali/cricket-clips:latest .
 
-docker pull joshuamali/cricket-clips:latest
+docker push joshuamali/cricket-clips:latest
 
 ## For Liam
 
