@@ -10,7 +10,8 @@ import pandas as pd
 from moviepy import VideoFileClip
 from moviepy.video.io.ffmpeg_tools import ffmpeg_extract_subclip
 from pytubefix import YouTube
-from pytubefix.cli import on_progress  # Import the progress callback
+from pytubefix.cli import on_progress
+from pytubefix.exceptions import PytubeFixError
 
 # from pytubefix.cli import on_progress # Requires rich, avoid for simplicity unless requested
 
