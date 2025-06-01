@@ -2,6 +2,8 @@
 
 ## For MALI
 
+open docker desktop if not already running
+
 docker build -t joshuamali/cricket-clips:latest .
 
 docker push joshuamali/cricket-clips:latest
