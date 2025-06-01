@@ -99,7 +99,7 @@ def download_video(url: str):
         }
         return str(video_file_path), metadata
 
-    except PytubeError as e:
+    except PytubeFixError as e:
         logging.error(f"PytubeError downloading video: {e}")
         return None, None
     except Exception as e:
